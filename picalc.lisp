@@ -1,0 +1,126 @@
+;; This is the pi-calculus in Common Lisp
+
+;; Output prefix: (out channel var P)
+;; Input prefix: (in channel var P)
+;; Parallel: (par P Q)
+;; If: (if expr P-If P-Else)
+;; Restriction: (new var P)
+;; Replication not implemented.
+
+(defparameter *clt-srv-prt* `(par (out b a (+ 1 2)) (in b c (out c d (+ 4 1)))))
+
+(defun tagged-p (ls tag) (and (listp ls) (eq (first ls) tag)))
+
+(defun out-p (ls) (tagged-p ls 'out))
+(defun in-p (ls) (tagged-p ls 'in))
+(defun sum-p (ls) (tagged-p ls 'plus))
+(defun parallel-p (ls) (tagged-p ls 'par))
+(defun if-p (ls) (tagged-p ls 'if))
+(defun restriction-p (ls) (tagged-p ls 'new))
+
+(defun make-chan (name) `(chan ,name nil))
+(defun chan-name (chan) (second chan))
+
+(defun expand-chan (names chan) (cons chan names))
+(defun lookup-chan (names chan)
+ (find-if #'(lambda (c)
+						 (eq (chan-name c) chan))
+		names))
+
+(defun lookup-val (names name)
+ (second (find-if #'(lambda (n) (eq (first n) name)) names)))
+
+(defun expand-names (names name val) (cons (list name val) names))
+
+(defun get-value-from-chan (chans chan-name)
+ (let ((chan (lookup-chan chans chan-name)))
+	(let ((val (first (third chan))))
+	 (setf (third chan) (rest (third chan)))
+	 val)))
+
+(defun add-to-chan (chan val) (push val (third chan)))
+
+(defun try-eval-par (proc chans names)
+ (cond
+	((in-p proc)
+	 	(let ((chan (second proc))
+					(new-name (third proc))
+					(new-expr (fourth proc)))
+		 (let ((val (get-value-from-chan chans chan)))
+			(if (not val)
+			 (values proc chans names)
+				(try-eval-par new-expr chans (expand-names names new-name val))))))
+	((out-p proc)
+	 	(let* ((chan-name (second proc))
+			  	 (val (eval-pi (third proc) nil names))
+			  	 (new-expr (fourth proc))
+					 (chan (lookup-chan chans chan-name)))
+		 (add-to-chan chan val)
+		 (try-eval-par new-expr chans names)))
+	(t (eval-pi proc chans names))))
+
+(defun value-p (expr) (or (numberp expr) (tagged-p expr :val) (null expr)))
+(defun op-p (expr)
+ 	(and (listp expr)
+	 		 (case (first expr)
+	 			((+ - / * = > < <= >=) t))))
+
+(defun op-op (expr)
+ (case (first expr)
+	(+ #'+) (- #'-) (* #'*) (/ #'/) (= #'=) (> #'>) (< #'<) (<= #'<=) (>= #'>=)))
+
+(defun eval-pi (expr &optional (chans nil) (names nil))
+	(cond
+	 ((restriction-p expr)
+		(let* ((chan (second expr))
+				   (expr (third expr))
+				   (new-chan (make-chan chan))
+					 (new-chans (expand-chan chans new-chan)))
+		 (eval-pi expr new-chans names)))
+	 ((parallel-p expr)
+		(let* ((p1 (second expr))
+					 (p2 (third expr))
+					 (namesold1 names)
+					 (namesold2 names)
+					 (chansold1 chans)
+					 (chansold2 chans))
+		 (when (= (length expr) 7)
+			(setf namesold1 (fourth expr)
+			 		  namesold2 (fifth expr)
+						chansold1 (sixth expr)
+						chansold2 (seventh expr)))
+		 (multiple-value-bind (res1 chans1 names1) (try-eval-par p1 chans namesold1)
+			(multiple-value-bind (res2 chans2 names2) (try-eval-par p2 chans namesold2)
+			 (cond
+			 	((and (value-p res1) (value-p res2)) (list :val res1 res2))
+				((and (equal res1 p1) (equal res2 p2))
+				 (values expr chans names))
+				(t
+					(eval-pi `(par ,res1 ,res2 ,names1 ,names2 ,chans1 ,chans2)
+										chans names)))))))
+	 ((if-p expr)
+		(let ((if-cond (second expr))
+					(if-then (third expr))
+					(if-else (fourth expr)))
+		 (multiple-value-bind (if-p x1 x2) (eval-pi if-cond chans names)
+			(when (or x1 x2)
+			 (error "Can't continue -- malformed expr"))
+			(if if-p
+			 (eval-pi if-then chans names)
+			 (eval-pi if-else chans names)))))
+	 ((null expr) nil)
+	 ((symbolp expr) (lookup-val names expr))
+	 ((op-p expr) (funcall (op-op expr)
+		 									 (eval-pi (second expr) nil names)
+											 (eval-pi (third expr) nil names)))
+	 ((numberp expr) expr)))
+
+(defun pi-machine (expr)
+ 	(multiple-value-bind (val x1 x2) (eval-pi expr)
+	 (when (or x1 x2)
+		(error "Can't continue -- malformed expr"))
+	 val))
+
+;; example:
+;; (pi-machine '(new x (par (par (in x c (if (= c 5) (+ c 2) 3)) (in x d d)) (out x 4 (out x 5 2)))))
+;; returns (:VAL (:VAL 7 4) 2)
